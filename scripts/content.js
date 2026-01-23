@@ -12,6 +12,80 @@ function initMinimap() {
     let lastMessageCount = 0;
     let isInternalScrolling = false;
 
+    // --- 🕵️‍♂️ 核心升级：全能型数据搜索函数 ---
+    // 不再假设数据一定在 props.message 里，而是遍历 props 的所有属性去寻找
+    const extractTextFromObject = (obj, depth = 0) => {
+        if (!obj || depth > 3) return null; // 防止死循环，只搜3层深度
+
+        // 1. 标准特征：content.parts (最常见)
+        if (obj.content && Array.isArray(obj.content.parts)) {
+            return obj.content.parts.join('\n');
+        }
+        
+        // 2. 变体特征：直接是 parts 数组
+        if (Array.isArray(obj.parts) && obj.parts.length > 0 && typeof obj.parts[0] === 'string') {
+            return obj.parts.join('\n');
+        }
+
+        // 3. 深度遍历：如果当前对象里还有子对象（比如 message, turn, result），继续挖
+        for (const key of Object.keys(obj)) {
+            const val = obj[key];
+            if (val && typeof val === 'object') {
+                // 如果属性名看起来很像存数据的，优先搜索
+                if (['message', 'turn', 'payload', 'result', 'item'].includes(key)) {
+                    const found = extractTextFromObject(val, depth + 1);
+                    if (found) return found;
+                }
+            }
+        }
+        return null;
+    };
+
+    const getReactMessageContent = (domNode) => {
+        try {
+            const fiberKey = Object.keys(domNode).find(key => key.startsWith('__reactFiber$'));
+            if (!fiberKey) return null;
+
+            let fiber = domNode[fiberKey];
+            
+            // 向上遍历 20 层 Fiber 节点
+            for (let i = 0; i < 20; i++) {
+                if (!fiber) break;
+                const props = fiber.memoizedProps;
+                
+                if (props) {
+                    // 使用上面的全能搜索函数扫描 Props
+                    const text = extractTextFromObject(props);
+                    if (text) return text;
+                }
+                
+                fiber = fiber.return;
+            }
+        } catch (e) {
+            console.error('Minimap: Error reading React state', e);
+        }
+        return null;
+    };
+
+    // --- 🛠️ 增强版 DOM 提取 ---
+    const getDomText = (block) => {
+        // 尝试获取 .markdown (GPT) 或 .whitespace-pre-wrap (用户)
+        const contentNode = block.querySelector('.markdown, .whitespace-pre-wrap');
+        
+        let text = "";
+        if (contentNode) {
+            text = contentNode.innerText;
+        }
+        
+        // 关键修正：如果特定容器取不到字（比如代码块导致的结构变化），
+        // 或者取到的字是空的，立刻降级使用最外层的 block.innerText
+        if (!text || text.trim().length === 0) {
+            text = block.innerText;
+        }
+        
+        return text;
+    };
+
     const getScrollContainer = () => {
         return document.querySelector('div.not-print\\:overflow-y-auto') || 
                document.querySelector('main')?.parentElement || 
@@ -36,9 +110,7 @@ function initMinimap() {
         messageBlocks.forEach((block) => {
             const role = block.getAttribute('data-message-author-role');
             const isUser = role === 'user';
-            const rawText = block.innerText || "";
-            const cleanText = rawText.replace(/\s+/g, ' ').trim(); 
-
+            
             const mapItem = document.createElement('div');
             mapItem.className = `minimap-item ${isUser ? 'minimap-user' : 'minimap-model'}`;
             
@@ -52,8 +124,6 @@ function initMinimap() {
                 const scrollContainer = getScrollContainer();
                 const scrollTarget = scrollContainer === window ? window : scrollContainer;
                 const targetNode = block.closest('article') || block;
-                
-                // --- 关键修正：跳转后距离顶部高度修改为 10 ---
                 const topOffset = targetNode.offsetTop - 10;
 
                 scrollTarget.scrollTo({ top: topOffset, behavior: 'smooth' });
@@ -64,7 +134,26 @@ function initMinimap() {
                 const rect = mapItem.getBoundingClientRect();
                 const roleName = isUser ? "YOU" : "GPT";
                 
-                previewCard.innerHTML = `<strong style="display:block; margin-bottom:5px;">${roleName}:</strong><div>${cleanText.substring(0, 250)}${cleanText.length > 250 ? '...' : ''}</div>`;
+                let cleanText = "";
+                const domText = getDomText(block) || "";
+                
+                // 1. 优先 DOM：只要有非空字符，就认为 DOM 是可用的
+                if (domText.trim().length > 0) {
+                    cleanText = domText.replace(/\s+/g, ' ').trim();
+                } else {
+                    // 2. DOM 彻底失效（虚拟化），启用全能 React 搜索
+                    const reactText = getReactMessageContent(block);
+                    if (reactText) {
+                        cleanText = reactText.replace(/\s+/g, ' ').trim();
+                    } else {
+                        cleanText = "(暂无预览内容)";
+                    }
+                }
+                
+                // 截断过长文本
+                const previewText = cleanText.length > 250 ? cleanText.substring(0, 250) + '...' : cleanText;
+                
+                previewCard.innerHTML = `<strong style="display:block; margin-bottom:5px;">${roleName}:</strong><div>${previewText}</div>`;
                 previewCard.style.borderLeftColor = isUser ? '#4285f4' : '#10a37f';
                 
                 let topPos = rect.top - 10;
@@ -131,13 +220,9 @@ function syncIndicator() {
             const startItem = items[startIndex];
             const endItem = items[endIndex];
 
-            // --- 修改位置：定义统一间隙变量 ---
-            const gap = 2; // 你可以修改这个数字（如 1 或 3）来调整间隙大小
+            const gap = 2; 
 
-            // 计算顶部：起始色块的 offsetTop 减去间隙
             const topPos = startItem.offsetTop - gap;
-            
-            // 计算高度：(结束色块底部 - 起始色块顶部) + 两倍间隙（上下各一个）
             const totalHeight = (endItem.offsetTop + endItem.offsetHeight) - startItem.offsetTop + (gap * 2);
             
             indicator.style.top = `${topPos}px`;
