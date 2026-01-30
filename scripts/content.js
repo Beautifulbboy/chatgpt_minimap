@@ -1,18 +1,11 @@
-// 全局缓存，用于存储 "messageID -> 文本内容" 的映射
-// 放在函数外部，防止 initMinimap 重复执行时被清空
+// 全局缓存与状态变量
 window.chatgptMinimapCache = window.chatgptMinimapCache || new Map();
 window.lastMinimapUrl = window.lastMinimapUrl || "";
+window.hasAutoScrolledToTop = false; // 确保这个标志位是全局的
 
 function initMinimap() {
+    // 如果容器存在，说明已经初始化过，直接返回
     if (document.getElementById('chatgpt-minimap-container')) return;
-
-    // --- 1. 检测 URL 变化，重置缓存和状态 ---
-    // 每次切换对话，清空缓存，准备重新抓取
-    if (window.lastMinimapUrl !== window.location.href) {
-        window.chatgptMinimapCache.clear();
-        window.lastMinimapUrl = window.location.href;
-        window.hasAutoScrolledToTop = false; // 重置自动滚动标记
-    }
 
     const minimap = document.createElement('div');
     minimap.id = 'chatgpt-minimap-container';
@@ -25,24 +18,18 @@ function initMinimap() {
     let lastMessageCount = 0;
     let isInternalScrolling = false;
 
-    // --- 2. 缓存收割机 (Harvest Logic) ---
-    // 这个函数负责从当前的 DOM 中提取所有可见的文字，并存入缓存
+    // --- 1. 缓存收割机 ---
     const harvestContent = () => {
         const blocks = document.querySelectorAll('main div[data-message-author-role]');
         blocks.forEach((block, index) => {
-            // 尝试获取唯一 ID，如果没有 ID 则使用索引作为兜底 (不太推荐，但能用)
             const id = block.getAttribute('data-message-id') || `msg-index-${index}`;
-            
-            // 如果缓存里已经有了，就不用重复提取了 (性能优化)
             if (window.chatgptMinimapCache.has(id)) return;
 
-            // 提取文字逻辑 (复用之前的增强版逻辑)
             let text = "";
             const contentNode = block.querySelector('.markdown, .whitespace-pre-wrap');
             if (contentNode) text = contentNode.innerText;
             if (!text || text.trim().length === 0) text = block.innerText || "";
 
-            // 只有当提取到了有效文字，才存入缓存
             if (text && text.trim().length > 0) {
                 window.chatgptMinimapCache.set(id, text);
             }
@@ -55,39 +42,46 @@ function initMinimap() {
                window;
     };
 
-    // --- 3. 自动滚动逻辑 ---
-    // 页面加载后，尝试自动滚动到顶部以触发旧消息渲染
+    // --- 2. 增强版自动滚动 (智能等待) ---
     const triggerAutoScroll = () => {
         if (window.hasAutoScrolledToTop) return;
         
         const scrollContainer = getScrollContainer();
         const scrollTarget = scrollContainer === window ? window : scrollContainer;
+        const messageBlocks = document.querySelectorAll('main div[data-message-author-role]');
+
+        // 关键优化：如果页面上还没刷出消息（可能是切换对话后的加载间隙），就不要滚，等一会再试
+        if (messageBlocks.length === 0) {
+            // console.log('Minimap: Waiting for content to load...');
+            setTimeout(triggerAutoScroll, 1000);
+            return;
+        }
 
         // 只有当确实有滚动条时才触发
         if (scrollContainer.scrollHeight > scrollContainer.clientHeight + 100) {
-            // 标记已执行
-            window.hasAutoScrolledToTop = true;
+            window.hasAutoScrolledToTop = true; // 上锁，防止反复触发
             
-            console.log('Minimap: Auto-scrolling to top to fetch history...');
-            
-            // 平滑滚动到顶部
+            // console.log('Minimap: Auto-scrolling to top to fetch history...');
             scrollTarget.scrollTo({ top: 0, behavior: 'smooth' });
             
-            // 滚动到顶部后，收割一次；延迟一点再收割一次（等待渲染）
+            // 滚动过程中多次收割，确保抓到所有文字
             setTimeout(harvestContent, 500);
             setTimeout(harvestContent, 1000);
-            setTimeout(harvestContent, 2000); // 多次收割确保万无一失
+            setTimeout(harvestContent, 2000); 
+        } else {
+            // 如果内容很短不需要滚动，但也标记为已完成，避免死循环
+            // 同时收割一次当前内容
+            window.hasAutoScrolledToTop = true;
+            harvestContent();
         }
     };
 
     const updateMinimap = () => {
-        // 每次更新前，先收割一波当前屏幕上的文字
-        harvestContent();
+        harvestContent(); // 每次重绘前都收割
 
         const messageBlocks = document.querySelectorAll('main div[data-message-author-role]');
         const minimapContainer = document.getElementById('chatgpt-minimap-container');
         
-        // 如果数量没变且 Minimap 已经存在，就不重建 DOM，但记得触发一次收割
         if (messageBlocks.length === lastMessageCount && minimapContainer.children.length > 1) {
             return;
         }
@@ -127,29 +121,21 @@ function initMinimap() {
                 const rect = mapItem.getBoundingClientRect();
                 const roleName = isUser ? "YOU" : "GPT";
                 
-                // --- 4. 预览逻辑升级：优先查缓存 ---
                 let cleanText = "";
-                
-                // A. 先看缓存里有没有这个 ID 的数据
+                // 优先查缓存
                 if (window.chatgptMinimapCache.has(id)) {
                     cleanText = window.chatgptMinimapCache.get(id);
                 } else {
-                    // B. 缓存没有（可能是新生成的），尝试从 DOM 现抓
                     const domText = block.innerText || "";
                     if (domText.trim().length > 0) {
                         cleanText = domText;
-                        // 顺手存入缓存
                         window.chatgptMinimapCache.set(id, cleanText); 
                     } else {
-                        // C. 都没有，说明被虚拟化了且还没浏览过
-                        cleanText = "(内容未加载，请滚动至该位置)";
+                        cleanText = "(需滚动加载)";
                     }
                 }
                 
-                // 简单的文本清理
                 cleanText = cleanText.replace(/\s+/g, ' ').trim();
-                
-                // 截断
                 const previewText = cleanText.length > 250 ? cleanText.substring(0, 250) + '...' : cleanText;
                 
                 previewCard.innerHTML = `<strong style="display:block; margin-bottom:5px;">${roleName}:</strong><div>${previewText}</div>`;
@@ -171,17 +157,16 @@ function initMinimap() {
         });
         syncIndicator();
         
-        // 尝试触发自动滚动（仅在第一次且页面够长时触发）
+        // 尝试触发自动滚动（带延迟，给页面加载留时间）
         setTimeout(triggerAutoScroll, 2000);
     };
 
     const scrollContainer = getScrollContainer();
     const eventTarget = scrollContainer === window ? window : scrollContainer;
     
-    // 滚动时也触发收割，这样用户手动浏览过的区域也会被缓存
     eventTarget.addEventListener('scroll', () => {
         syncIndicator();
-        harvestContent(); // <--- 关键：滚动时疯狂收割
+        harvestContent();
     }, { passive: true });
 
     const observer = new MutationObserver(() => {
@@ -191,7 +176,6 @@ function initMinimap() {
     observer.observe(document.body, { childList: true, subtree: true });
 
     setTimeout(updateMinimap, 1500);
-    setTimeout(updateMinimap, 4000); 
 }
 
 function syncIndicator() {
@@ -227,10 +211,8 @@ function syncIndicator() {
             const startItem = items[startIndex];
             const endItem = items[endIndex];
             const gap = 2; 
-
             const topPos = startItem.offsetTop - gap;
             const totalHeight = (endItem.offsetTop + endItem.offsetHeight) - startItem.offsetTop + (gap * 2);
-            
             indicator.style.top = `${topPos}px`;
             indicator.style.height = `${totalHeight}px`;
             indicator.style.opacity = "1";
@@ -240,11 +222,32 @@ function syncIndicator() {
     indicator.style.opacity = "0.3"; 
 }
 
+// --- 3. 核心心跳检测：处理 URL 切换 ---
 window.addEventListener('load', initMinimap);
+
 setInterval(() => {
-    // 定期检查 URL 变化，用于处理 SPA 页面跳转
-    if (window.lastMinimapUrl && window.lastMinimapUrl !== window.location.href) {
-        initMinimap(); 
+    const currentUrl = window.location.href;
+    
+    // 如果发现 URL 变了（说明用户切换了对话）
+    if (window.lastMinimapUrl !== currentUrl) {
+        // 1. 更新 URL 记录
+        window.lastMinimapUrl = currentUrl;
+        
+        // 2. 清空旧对话的缓存
+        window.chatgptMinimapCache.clear();
+        
+        // 3. 重置滚动锁，允许新对话再次触发滚动
+        window.hasAutoScrolledToTop = false;
+        
+        // 4. 【关键】移除旧的 Minimap DOM
+        // 这样做的目的是强行让 initMinimap() 里的逻辑重新跑一遍
+        // 包括重新绑定 Observer，重新触发 setTimeout(triggerAutoScroll)
+        const existingMinimap = document.getElementById('chatgpt-minimap-container');
+        if (existingMinimap) existingMinimap.remove();
     }
-    if (!document.getElementById('chatgpt-minimap-container')) initMinimap();
-}, 3000);
+
+    // 如果 DOM 被移除了（上面那步做的），或者页面刚加载，initMinimap 就会执行
+    if (!document.getElementById('chatgpt-minimap-container')) {
+        initMinimap();
+    }
+}, 1000); // 每秒检查一次，响应更灵敏
