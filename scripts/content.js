@@ -102,7 +102,13 @@ function initMinimap() {
                 const scrollContainer = getScrollContainer();
                 const scrollTarget = scrollContainer === window ? window : scrollContainer;
                 const targetNode = block.closest('article') || block;
-                const topOffset = targetNode.offsetTop - 10;
+                
+                // --- 3. 关键修改：区分角色的跳转偏移量 ---
+                // isUser ? 0 : 10 
+                // 如果是用户问题，不留任何顶部空隙 (0)，确保把上面的 AI 回答彻底挤出视口检测区
+                // 如果是 AI 回答，保留 10px 空隙，视觉上不那么局促
+                const offsetBuffer = isUser ? 0 : 10;
+                const topOffset = targetNode.offsetTop - offsetBuffer;
 
                 scrollTarget.scrollTo({ top: topOffset, behavior: 'smooth' });
                 setTimeout(() => { isInternalScrolling = false; }, 1000);
@@ -153,11 +159,8 @@ function initMinimap() {
     const scrollContainer = getScrollContainer();
     const eventTarget = scrollContainer === window ? window : scrollContainer;
     
-    // 滚动监听
     eventTarget.addEventListener('scroll', () => {
         syncIndicator();
-        
-        // 简单节流：减少 harvesting 频率，提升滚动性能
         if (!window.harvestTimer) {
             window.harvestTimer = setTimeout(() => {
                 harvestContent();
@@ -175,13 +178,12 @@ function initMinimap() {
     setTimeout(updateMinimap, 1500);
 }
 
-// --- 3. 核心修改：自适应视口范围的 Indicator ---
+// --- 4. 自适应 Indicator (保持之前的完美算法) ---
 function syncIndicator() {
     const indicator = document.getElementById('minimap-viewport-indicator');
     const minimap = document.getElementById('chatgpt-minimap-container');
     if (!indicator || !minimap) return;
 
-    // 获取所有对话块
     const allBlocks = Array.from(document.querySelectorAll('main div[data-message-author-role]'));
     const items = minimap.querySelectorAll('.minimap-item');
 
@@ -194,20 +196,15 @@ function syncIndicator() {
     let endIndex = -1;
     const viewportHeight = window.innerHeight;
 
-    // 遍历寻找视口内的第一个和最后一个元素
     for (let i = 0; i < allBlocks.length; i++) {
         const rect = allBlocks[i].getBoundingClientRect();
-        
-        // 判断元素是否在视口内（哪怕只有一部分）
-        // buffer: 10px 的缓冲，避免边缘闪烁
+        // 这里的阈值 10px 配合上面的 offsetBuffer=0 使用效果最佳
         const isVisible = rect.bottom > 10 && rect.top < viewportHeight - 10;
 
         if (isVisible) {
-            if (startIndex === -1) startIndex = i; // 记录第一个见到的
-            endIndex = i; // 不断更新最后一个见到的
+            if (startIndex === -1) startIndex = i; 
+            endIndex = i; 
         } else if (startIndex !== -1 && rect.top >= viewportHeight) {
-            // 优化：既然已经找到过 Start，且现在的元素已经在屏幕下面了，
-            // 说明后面的元素肯定都在下面，直接停止循环
             break;
         }
     }
@@ -217,15 +214,9 @@ function syncIndicator() {
         const endItem = items[endIndex];
 
         if (startItem && endItem) {
-            const gap = 2; // 间隙
-
-            // 计算 Start 块的顶部
+            const gap = 2; 
             const topPos = startItem.offsetTop - gap;
-            
-            // 计算 End 块的底部 (Top + Height)
             const bottomPos = endItem.offsetTop + endItem.offsetHeight + gap;
-            
-            // 总高度 = 底部 - 顶部
             const totalHeight = bottomPos - topPos;
 
             indicator.style.top = `${topPos}px`;
@@ -237,7 +228,6 @@ function syncIndicator() {
     }
 }
 
-// 心跳检测与初始化
 window.addEventListener('load', initMinimap);
 
 setInterval(() => {
