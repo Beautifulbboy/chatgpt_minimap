@@ -1,7 +1,10 @@
-// 全局缓存与状态变量 (保持不变)
+// 全局缓存与状态变量
 window.chatgptMinimapCache = window.chatgptMinimapCache || new Map();
 window.lastMinimapUrl = window.lastMinimapUrl || "";
 window.hasAutoScrolledToTop = false;
+
+// 定义存储 Key
+const STORAGE_KEY_STAY_TOP = 'chatgpt_minimap_stay_top';
 
 function initMinimap() {
     if (document.getElementById('chatgpt-minimap-container')) return;
@@ -41,7 +44,7 @@ function initMinimap() {
                window;
     };
 
-    // --- 2. 自动滚动 ---
+    // --- 2. 增强版自动滚动 (含“滚回底部”逻辑) ---
     const triggerAutoScroll = () => {
         if (window.hasAutoScrolledToTop) return;
         
@@ -56,11 +59,24 @@ function initMinimap() {
 
         if (scrollContainer.scrollHeight > scrollContainer.clientHeight + 100) {
             window.hasAutoScrolledToTop = true;
+            
+            // 1. 先滚到顶部加载历史
             scrollTarget.scrollTo({ top: 0, behavior: 'smooth' });
             
+            // 2. 期间多次收割
             setTimeout(harvestContent, 500);
             setTimeout(harvestContent, 1000);
             setTimeout(harvestContent, 2000); 
+
+            // 3. 最终决断：是留上面，还是回下面？
+            setTimeout(() => {
+                const stayTop = localStorage.getItem(STORAGE_KEY_STAY_TOP) === 'true';
+                if (!stayTop) {
+                    // 如果开关没开，加载完历史后，自动滚回底部
+                    // console.log("Scrolling back to bottom...");
+                    scrollTarget.scrollTo({ top: scrollContainer.scrollHeight, behavior: 'smooth' });
+                }
+            }, 2500); // 给足时间让历史消息加载出来
         } else {
             window.hasAutoScrolledToTop = true;
             harvestContent();
@@ -73,7 +89,10 @@ function initMinimap() {
         const messageBlocks = document.querySelectorAll('main div[data-message-author-role]');
         const minimapContainer = document.getElementById('chatgpt-minimap-container');
         
-        if (messageBlocks.length === lastMessageCount && minimapContainer.children.length > 1) {
+        // 注意：这里移除了 children.length 的判断，因为我们需要确保 Toggle 按钮总是存在
+        // 但为了性能，如果消息数没变且 Toggle 已存在，就不重绘
+        const hasToggle = minimapContainer.querySelector('.minimap-toggle-container');
+        if (messageBlocks.length === lastMessageCount && hasToggle) {
             return;
         }
         
@@ -84,6 +103,7 @@ function initMinimap() {
         indicator.id = 'minimap-viewport-indicator';
         minimap.appendChild(indicator);
 
+        // --- 渲染消息块 ---
         messageBlocks.forEach((block, index) => {
             const role = block.getAttribute('data-message-author-role');
             const isUser = role === 'user';
@@ -103,10 +123,6 @@ function initMinimap() {
                 const scrollTarget = scrollContainer === window ? window : scrollContainer;
                 const targetNode = block.closest('article') || block;
                 
-                // --- 3. 关键修改：区分角色的跳转偏移量 ---
-                // isUser ? 0 : 10 
-                // 如果是用户问题，不留任何顶部空隙 (0)，确保把上面的 AI 回答彻底挤出视口检测区
-                // 如果是 AI 回答，保留 10px 空隙，视觉上不那么局促
                 const offsetBuffer = isUser ? 0 : 10;
                 const topOffset = targetNode.offsetTop - offsetBuffer;
 
@@ -151,6 +167,46 @@ function initMinimap() {
 
             minimap.appendChild(mapItem);
         });
+
+        // --- 3. 渲染底部开关按钮 ---
+        const toggleContainer = document.createElement('div');
+        toggleContainer.className = 'minimap-toggle-container';
+        // 读取保存的状态
+        const isStayTop = localStorage.getItem(STORAGE_KEY_STAY_TOP) === 'true';
+        if (isStayTop) toggleContainer.classList.add('minimap-toggle-active');
+        
+        // 设置提示文本
+        toggleContainer.title = isStayTop 
+            ? "当前：加载后停留在顶部 (点击切换)" 
+            : "当前：加载后滚回底部 (点击切换)";
+
+        toggleContainer.innerHTML = `
+            <div class="minimap-toggle-icon">
+                ${isStayTop ? '滚至顶部' : '保持底部'}
+            </div>
+        `;
+
+        toggleContainer.addEventListener('click', (e) => {
+            e.stopPropagation(); // 防止触发其他点击事件
+            
+            // 切换状态
+            const currentState = localStorage.getItem(STORAGE_KEY_STAY_TOP) === 'true';
+            const newState = !currentState;
+            localStorage.setItem(STORAGE_KEY_STAY_TOP, newState);
+            
+            // 更新 UI
+            toggleContainer.classList.toggle('minimap-toggle-active');
+            toggleContainer.querySelector('.minimap-toggle-icon').innerHTML = newState ? '滚至顶部' : '保持底部';
+            toggleContainer.title = newState 
+                ? "当前：加载后停留在顶部 (点击切换)" 
+                : "当前：加载后滚回底部 (点击切换)";
+                
+            // (可选) 如果用户切换了开关，可能想立即执行一次滚动逻辑？
+            // 这里我们暂时不自动触发，只在下次刷新/切换对话时生效，或者你可以手动触发一次
+        });
+
+        minimap.appendChild(toggleContainer);
+
         syncIndicator();
         
         setTimeout(triggerAutoScroll, 2000);
@@ -178,7 +234,7 @@ function initMinimap() {
     setTimeout(updateMinimap, 1500);
 }
 
-// --- 4. 自适应 Indicator (保持之前的完美算法) ---
+// --- Indicator 逻辑保持不变 ---
 function syncIndicator() {
     const indicator = document.getElementById('minimap-viewport-indicator');
     const minimap = document.getElementById('chatgpt-minimap-container');
@@ -198,7 +254,6 @@ function syncIndicator() {
 
     for (let i = 0; i < allBlocks.length; i++) {
         const rect = allBlocks[i].getBoundingClientRect();
-        // 这里的阈值 10px 配合上面的 offsetBuffer=0 使用效果最佳
         const isVisible = rect.bottom > 10 && rect.top < viewportHeight - 10;
 
         if (isVisible) {
@@ -228,6 +283,7 @@ function syncIndicator() {
     }
 }
 
+// 心跳检测
 window.addEventListener('load', initMinimap);
 
 setInterval(() => {
