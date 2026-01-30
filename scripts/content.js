@@ -1,5 +1,18 @@
+// 全局缓存，用于存储 "messageID -> 文本内容" 的映射
+// 放在函数外部，防止 initMinimap 重复执行时被清空
+window.chatgptMinimapCache = window.chatgptMinimapCache || new Map();
+window.lastMinimapUrl = window.lastMinimapUrl || "";
+
 function initMinimap() {
     if (document.getElementById('chatgpt-minimap-container')) return;
+
+    // --- 1. 检测 URL 变化，重置缓存和状态 ---
+    // 每次切换对话，清空缓存，准备重新抓取
+    if (window.lastMinimapUrl !== window.location.href) {
+        window.chatgptMinimapCache.clear();
+        window.lastMinimapUrl = window.location.href;
+        window.hasAutoScrolledToTop = false; // 重置自动滚动标记
+    }
 
     const minimap = document.createElement('div');
     minimap.id = 'chatgpt-minimap-container';
@@ -12,78 +25,28 @@ function initMinimap() {
     let lastMessageCount = 0;
     let isInternalScrolling = false;
 
-    // --- 🕵️‍♂️ 核心升级：全能型数据搜索函数 ---
-    // 不再假设数据一定在 props.message 里，而是遍历 props 的所有属性去寻找
-    const extractTextFromObject = (obj, depth = 0) => {
-        if (!obj || depth > 3) return null; // 防止死循环，只搜3层深度
-
-        // 1. 标准特征：content.parts (最常见)
-        if (obj.content && Array.isArray(obj.content.parts)) {
-            return obj.content.parts.join('\n');
-        }
-        
-        // 2. 变体特征：直接是 parts 数组
-        if (Array.isArray(obj.parts) && obj.parts.length > 0 && typeof obj.parts[0] === 'string') {
-            return obj.parts.join('\n');
-        }
-
-        // 3. 深度遍历：如果当前对象里还有子对象（比如 message, turn, result），继续挖
-        for (const key of Object.keys(obj)) {
-            const val = obj[key];
-            if (val && typeof val === 'object') {
-                // 如果属性名看起来很像存数据的，优先搜索
-                if (['message', 'turn', 'payload', 'result', 'item'].includes(key)) {
-                    const found = extractTextFromObject(val, depth + 1);
-                    if (found) return found;
-                }
-            }
-        }
-        return null;
-    };
-
-    const getReactMessageContent = (domNode) => {
-        try {
-            const fiberKey = Object.keys(domNode).find(key => key.startsWith('__reactFiber$'));
-            if (!fiberKey) return null;
-
-            let fiber = domNode[fiberKey];
+    // --- 2. 缓存收割机 (Harvest Logic) ---
+    // 这个函数负责从当前的 DOM 中提取所有可见的文字，并存入缓存
+    const harvestContent = () => {
+        const blocks = document.querySelectorAll('main div[data-message-author-role]');
+        blocks.forEach((block, index) => {
+            // 尝试获取唯一 ID，如果没有 ID 则使用索引作为兜底 (不太推荐，但能用)
+            const id = block.getAttribute('data-message-id') || `msg-index-${index}`;
             
-            // 向上遍历 20 层 Fiber 节点
-            for (let i = 0; i < 20; i++) {
-                if (!fiber) break;
-                const props = fiber.memoizedProps;
-                
-                if (props) {
-                    // 使用上面的全能搜索函数扫描 Props
-                    const text = extractTextFromObject(props);
-                    if (text) return text;
-                }
-                
-                fiber = fiber.return;
-            }
-        } catch (e) {
-            console.error('Minimap: Error reading React state', e);
-        }
-        return null;
-    };
+            // 如果缓存里已经有了，就不用重复提取了 (性能优化)
+            if (window.chatgptMinimapCache.has(id)) return;
 
-    // --- 🛠️ 增强版 DOM 提取 ---
-    const getDomText = (block) => {
-        // 尝试获取 .markdown (GPT) 或 .whitespace-pre-wrap (用户)
-        const contentNode = block.querySelector('.markdown, .whitespace-pre-wrap');
-        
-        let text = "";
-        if (contentNode) {
-            text = contentNode.innerText;
-        }
-        
-        // 关键修正：如果特定容器取不到字（比如代码块导致的结构变化），
-        // 或者取到的字是空的，立刻降级使用最外层的 block.innerText
-        if (!text || text.trim().length === 0) {
-            text = block.innerText;
-        }
-        
-        return text;
+            // 提取文字逻辑 (复用之前的增强版逻辑)
+            let text = "";
+            const contentNode = block.querySelector('.markdown, .whitespace-pre-wrap');
+            if (contentNode) text = contentNode.innerText;
+            if (!text || text.trim().length === 0) text = block.innerText || "";
+
+            // 只有当提取到了有效文字，才存入缓存
+            if (text && text.trim().length > 0) {
+                window.chatgptMinimapCache.set(id, text);
+            }
+        });
     };
 
     const getScrollContainer = () => {
@@ -92,10 +55,39 @@ function initMinimap() {
                window;
     };
 
+    // --- 3. 自动滚动逻辑 ---
+    // 页面加载后，尝试自动滚动到顶部以触发旧消息渲染
+    const triggerAutoScroll = () => {
+        if (window.hasAutoScrolledToTop) return;
+        
+        const scrollContainer = getScrollContainer();
+        const scrollTarget = scrollContainer === window ? window : scrollContainer;
+
+        // 只有当确实有滚动条时才触发
+        if (scrollContainer.scrollHeight > scrollContainer.clientHeight + 100) {
+            // 标记已执行
+            window.hasAutoScrolledToTop = true;
+            
+            console.log('Minimap: Auto-scrolling to top to fetch history...');
+            
+            // 平滑滚动到顶部
+            scrollTarget.scrollTo({ top: 0, behavior: 'smooth' });
+            
+            // 滚动到顶部后，收割一次；延迟一点再收割一次（等待渲染）
+            setTimeout(harvestContent, 500);
+            setTimeout(harvestContent, 1000);
+            setTimeout(harvestContent, 2000); // 多次收割确保万无一失
+        }
+    };
+
     const updateMinimap = () => {
+        // 每次更新前，先收割一波当前屏幕上的文字
+        harvestContent();
+
         const messageBlocks = document.querySelectorAll('main div[data-message-author-role]');
         const minimapContainer = document.getElementById('chatgpt-minimap-container');
         
+        // 如果数量没变且 Minimap 已经存在，就不重建 DOM，但记得触发一次收割
         if (messageBlocks.length === lastMessageCount && minimapContainer.children.length > 1) {
             return;
         }
@@ -107,9 +99,10 @@ function initMinimap() {
         indicator.id = 'minimap-viewport-indicator';
         minimap.appendChild(indicator);
 
-        messageBlocks.forEach((block) => {
+        messageBlocks.forEach((block, index) => {
             const role = block.getAttribute('data-message-author-role');
             const isUser = role === 'user';
+            const id = block.getAttribute('data-message-id') || `msg-index-${index}`;
             
             const mapItem = document.createElement('div');
             mapItem.className = `minimap-item ${isUser ? 'minimap-user' : 'minimap-model'}`;
@@ -134,23 +127,29 @@ function initMinimap() {
                 const rect = mapItem.getBoundingClientRect();
                 const roleName = isUser ? "YOU" : "GPT";
                 
+                // --- 4. 预览逻辑升级：优先查缓存 ---
                 let cleanText = "";
-                const domText = getDomText(block) || "";
                 
-                // 1. 优先 DOM：只要有非空字符，就认为 DOM 是可用的
-                if (domText.trim().length > 0) {
-                    cleanText = domText.replace(/\s+/g, ' ').trim();
+                // A. 先看缓存里有没有这个 ID 的数据
+                if (window.chatgptMinimapCache.has(id)) {
+                    cleanText = window.chatgptMinimapCache.get(id);
                 } else {
-                    // 2. DOM 彻底失效（虚拟化），启用全能 React 搜索
-                    const reactText = getReactMessageContent(block);
-                    if (reactText) {
-                        cleanText = reactText.replace(/\s+/g, ' ').trim();
+                    // B. 缓存没有（可能是新生成的），尝试从 DOM 现抓
+                    const domText = block.innerText || "";
+                    if (domText.trim().length > 0) {
+                        cleanText = domText;
+                        // 顺手存入缓存
+                        window.chatgptMinimapCache.set(id, cleanText); 
                     } else {
-                        cleanText = "(暂无预览内容)";
+                        // C. 都没有，说明被虚拟化了且还没浏览过
+                        cleanText = "(内容未加载，请滚动至该位置)";
                     }
                 }
                 
-                // 截断过长文本
+                // 简单的文本清理
+                cleanText = cleanText.replace(/\s+/g, ' ').trim();
+                
+                // 截断
                 const previewText = cleanText.length > 250 ? cleanText.substring(0, 250) + '...' : cleanText;
                 
                 previewCard.innerHTML = `<strong style="display:block; margin-bottom:5px;">${roleName}:</strong><div>${previewText}</div>`;
@@ -171,11 +170,19 @@ function initMinimap() {
             minimap.appendChild(mapItem);
         });
         syncIndicator();
+        
+        // 尝试触发自动滚动（仅在第一次且页面够长时触发）
+        setTimeout(triggerAutoScroll, 2000);
     };
 
     const scrollContainer = getScrollContainer();
     const eventTarget = scrollContainer === window ? window : scrollContainer;
-    eventTarget.addEventListener('scroll', syncIndicator, { passive: true });
+    
+    // 滚动时也触发收割，这样用户手动浏览过的区域也会被缓存
+    eventTarget.addEventListener('scroll', () => {
+        syncIndicator();
+        harvestContent(); // <--- 关键：滚动时疯狂收割
+    }, { passive: true });
 
     const observer = new MutationObserver(() => {
         clearTimeout(window.refreshTimer);
@@ -219,7 +226,6 @@ function syncIndicator() {
 
             const startItem = items[startIndex];
             const endItem = items[endIndex];
-
             const gap = 2; 
 
             const topPos = startItem.offsetTop - gap;
@@ -236,5 +242,9 @@ function syncIndicator() {
 
 window.addEventListener('load', initMinimap);
 setInterval(() => {
+    // 定期检查 URL 变化，用于处理 SPA 页面跳转
+    if (window.lastMinimapUrl && window.lastMinimapUrl !== window.location.href) {
+        initMinimap(); 
+    }
     if (!document.getElementById('chatgpt-minimap-container')) initMinimap();
 }, 3000);
