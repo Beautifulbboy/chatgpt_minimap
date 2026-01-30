@@ -1,10 +1,9 @@
-// 全局缓存与状态变量
+// 全局缓存与状态变量 (保持不变)
 window.chatgptMinimapCache = window.chatgptMinimapCache || new Map();
 window.lastMinimapUrl = window.lastMinimapUrl || "";
-window.hasAutoScrolledToTop = false; // 确保这个标志位是全局的
+window.hasAutoScrolledToTop = false;
 
 function initMinimap() {
-    // 如果容器存在，说明已经初始化过，直接返回
     if (document.getElementById('chatgpt-minimap-container')) return;
 
     const minimap = document.createElement('div');
@@ -42,7 +41,7 @@ function initMinimap() {
                window;
     };
 
-    // --- 2. 增强版自动滚动 (智能等待) ---
+    // --- 2. 自动滚动 ---
     const triggerAutoScroll = () => {
         if (window.hasAutoScrolledToTop) return;
         
@@ -50,34 +49,26 @@ function initMinimap() {
         const scrollTarget = scrollContainer === window ? window : scrollContainer;
         const messageBlocks = document.querySelectorAll('main div[data-message-author-role]');
 
-        // 关键优化：如果页面上还没刷出消息（可能是切换对话后的加载间隙），就不要滚，等一会再试
         if (messageBlocks.length === 0) {
-            // console.log('Minimap: Waiting for content to load...');
             setTimeout(triggerAutoScroll, 1000);
             return;
         }
 
-        // 只有当确实有滚动条时才触发
         if (scrollContainer.scrollHeight > scrollContainer.clientHeight + 100) {
-            window.hasAutoScrolledToTop = true; // 上锁，防止反复触发
-            
-            // console.log('Minimap: Auto-scrolling to top to fetch history...');
+            window.hasAutoScrolledToTop = true;
             scrollTarget.scrollTo({ top: 0, behavior: 'smooth' });
             
-            // 滚动过程中多次收割，确保抓到所有文字
             setTimeout(harvestContent, 500);
             setTimeout(harvestContent, 1000);
             setTimeout(harvestContent, 2000); 
         } else {
-            // 如果内容很短不需要滚动，但也标记为已完成，避免死循环
-            // 同时收割一次当前内容
             window.hasAutoScrolledToTop = true;
             harvestContent();
         }
     };
 
     const updateMinimap = () => {
-        harvestContent(); // 每次重绘前都收割
+        harvestContent(); 
 
         const messageBlocks = document.querySelectorAll('main div[data-message-author-role]');
         const minimapContainer = document.getElementById('chatgpt-minimap-container');
@@ -122,7 +113,6 @@ function initMinimap() {
                 const roleName = isUser ? "YOU" : "GPT";
                 
                 let cleanText = "";
-                // 优先查缓存
                 if (window.chatgptMinimapCache.has(id)) {
                     cleanText = window.chatgptMinimapCache.get(id);
                 } else {
@@ -157,16 +147,23 @@ function initMinimap() {
         });
         syncIndicator();
         
-        // 尝试触发自动滚动（带延迟，给页面加载留时间）
         setTimeout(triggerAutoScroll, 2000);
     };
 
     const scrollContainer = getScrollContainer();
     const eventTarget = scrollContainer === window ? window : scrollContainer;
     
+    // 滚动监听
     eventTarget.addEventListener('scroll', () => {
         syncIndicator();
-        harvestContent();
+        
+        // 简单节流：减少 harvesting 频率，提升滚动性能
+        if (!window.harvestTimer) {
+            window.harvestTimer = setTimeout(() => {
+                harvestContent();
+                window.harvestTimer = null;
+            }, 300);
+        }
     }, { passive: true });
 
     const observer = new MutationObserver(() => {
@@ -178,76 +175,83 @@ function initMinimap() {
     setTimeout(updateMinimap, 1500);
 }
 
+// --- 3. 核心修改：自适应视口范围的 Indicator ---
 function syncIndicator() {
     const indicator = document.getElementById('minimap-viewport-indicator');
     const minimap = document.getElementById('chatgpt-minimap-container');
     if (!indicator || !minimap) return;
 
-    const centerX = window.innerWidth / 2;
-    const centerY = window.innerHeight / 2;
-    const centerElement = document.elementFromPoint(centerX, centerY);
-    const currentBlock = centerElement?.closest('div[data-message-author-role]');
+    // 获取所有对话块
+    const allBlocks = Array.from(document.querySelectorAll('main div[data-message-author-role]'));
+    const items = minimap.querySelectorAll('.minimap-item');
 
-    if (currentBlock) {
-        const allBlocks = Array.from(document.querySelectorAll('main div[data-message-author-role]'));
-        const currentIndex = allBlocks.indexOf(currentBlock);
-        const items = minimap.querySelectorAll('.minimap-item');
+    if (allBlocks.length === 0 || items.length === 0) {
+        indicator.style.opacity = "0";
+        return;
+    }
 
-        if (items[currentIndex]) {
-            let startIndex = currentIndex;
-            let endIndex = currentIndex;
-            const role = currentBlock.getAttribute('data-message-author-role');
-            
-            if (role === 'user') {
-                if (items[currentIndex + 1] && allBlocks[currentIndex + 1].getAttribute('data-message-author-role') === 'assistant') {
-                    endIndex = currentIndex + 1;
-                }
-            } else {
-                if (items[currentIndex - 1] && allBlocks[currentIndex - 1].getAttribute('data-message-author-role') === 'user') {
-                    startIndex = currentIndex - 1;
-                }
-            }
+    let startIndex = -1;
+    let endIndex = -1;
+    const viewportHeight = window.innerHeight;
 
-            const startItem = items[startIndex];
-            const endItem = items[endIndex];
-            const gap = 2; 
+    // 遍历寻找视口内的第一个和最后一个元素
+    for (let i = 0; i < allBlocks.length; i++) {
+        const rect = allBlocks[i].getBoundingClientRect();
+        
+        // 判断元素是否在视口内（哪怕只有一部分）
+        // buffer: 10px 的缓冲，避免边缘闪烁
+        const isVisible = rect.bottom > 10 && rect.top < viewportHeight - 10;
+
+        if (isVisible) {
+            if (startIndex === -1) startIndex = i; // 记录第一个见到的
+            endIndex = i; // 不断更新最后一个见到的
+        } else if (startIndex !== -1 && rect.top >= viewportHeight) {
+            // 优化：既然已经找到过 Start，且现在的元素已经在屏幕下面了，
+            // 说明后面的元素肯定都在下面，直接停止循环
+            break;
+        }
+    }
+
+    if (startIndex !== -1 && endIndex !== -1) {
+        const startItem = items[startIndex];
+        const endItem = items[endIndex];
+
+        if (startItem && endItem) {
+            const gap = 2; // 间隙
+
+            // 计算 Start 块的顶部
             const topPos = startItem.offsetTop - gap;
-            const totalHeight = (endItem.offsetTop + endItem.offsetHeight) - startItem.offsetTop + (gap * 2);
+            
+            // 计算 End 块的底部 (Top + Height)
+            const bottomPos = endItem.offsetTop + endItem.offsetHeight + gap;
+            
+            // 总高度 = 底部 - 顶部
+            const totalHeight = bottomPos - topPos;
+
             indicator.style.top = `${topPos}px`;
             indicator.style.height = `${totalHeight}px`;
             indicator.style.opacity = "1";
-            return;
         }
+    } else {
+        indicator.style.opacity = "0";
     }
-    indicator.style.opacity = "0.3"; 
 }
 
-// --- 3. 核心心跳检测：处理 URL 切换 ---
+// 心跳检测与初始化
 window.addEventListener('load', initMinimap);
 
 setInterval(() => {
     const currentUrl = window.location.href;
-    
-    // 如果发现 URL 变了（说明用户切换了对话）
     if (window.lastMinimapUrl !== currentUrl) {
-        // 1. 更新 URL 记录
         window.lastMinimapUrl = currentUrl;
-        
-        // 2. 清空旧对话的缓存
         window.chatgptMinimapCache.clear();
-        
-        // 3. 重置滚动锁，允许新对话再次触发滚动
         window.hasAutoScrolledToTop = false;
         
-        // 4. 【关键】移除旧的 Minimap DOM
-        // 这样做的目的是强行让 initMinimap() 里的逻辑重新跑一遍
-        // 包括重新绑定 Observer，重新触发 setTimeout(triggerAutoScroll)
         const existingMinimap = document.getElementById('chatgpt-minimap-container');
         if (existingMinimap) existingMinimap.remove();
     }
 
-    // 如果 DOM 被移除了（上面那步做的），或者页面刚加载，initMinimap 就会执行
     if (!document.getElementById('chatgpt-minimap-container')) {
         initMinimap();
     }
-}, 1000); // 每秒检查一次，响应更灵敏
+}, 1000);
