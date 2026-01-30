@@ -8,17 +8,15 @@ const STORAGE_KEY_STAY_TOP = 'chatgpt_minimap_stay_top';
 function initMinimap() {
     if (document.getElementById('chatgpt-minimap-container')) return;
 
-    // --- 1. 创建更稳固的 DOM 结构 ---
-    // 结构：MainContainer (Fixed) -> [ScrollWrapper (Auto Scroll), ToggleButton (Fixed)]
+    // --- 1. DOM 结构 ---
     const minimap = document.createElement('div');
     minimap.id = 'chatgpt-minimap-container';
     
-    // 创建滚动包装层
+    // 滚动包装层
     const scrollWrapper = document.createElement('div');
     scrollWrapper.id = 'chatgpt-minimap-scroll-wrapper';
     minimap.appendChild(scrollWrapper);
 
-    // 创建预览卡片 (放在 body 上以免被裁剪)
     const previewCard = document.createElement('div');
     previewCard.id = 'chatgpt-minimap-preview';
     document.body.appendChild(previewCard);
@@ -26,7 +24,7 @@ function initMinimap() {
     let lastMessageCount = 0;
     let isInternalScrolling = false;
 
-    // --- 2. 创建底部开关 (只创建一次) ---
+    // --- 2. 底部开关 ---
     const toggleContainer = document.createElement('div');
     toggleContainer.className = 'minimap-toggle-container';
     
@@ -45,26 +43,23 @@ function initMinimap() {
             </div>
         `;
     };
-    renderToggle(); // 初始化渲染
+    renderToggle();
 
     toggleContainer.addEventListener('click', (e) => {
         e.stopPropagation();
         const currentState = localStorage.getItem(STORAGE_KEY_STAY_TOP) === 'true';
         localStorage.setItem(STORAGE_KEY_STAY_TOP, !currentState);
         
-        // 更新样式
         if (!currentState) toggleContainer.classList.add('minimap-toggle-active');
         else toggleContainer.classList.remove('minimap-toggle-active');
         
         renderToggle();
     });
 
-    // 将开关添加到主容器底部 (在 ScrollWrapper 之外)
     minimap.appendChild(toggleContainer);
     document.body.appendChild(minimap);
 
-
-    // --- 3. 核心功能逻辑 ---
+    // --- 3. 核心逻辑 ---
     const harvestContent = () => {
         const blocks = document.querySelectorAll('main div[data-message-author-role]');
         blocks.forEach((block, index) => {
@@ -124,7 +119,6 @@ function initMinimap() {
         harvestContent(); 
 
         const messageBlocks = document.querySelectorAll('main div[data-message-author-role]');
-        // 关键修改：现在我们检查 scrollWrapper 的子元素数量，而不是主容器
         const scrollWrapper = document.getElementById('chatgpt-minimap-scroll-wrapper');
         if (!scrollWrapper) return;
 
@@ -133,7 +127,7 @@ function initMinimap() {
         }
         
         lastMessageCount = messageBlocks.length;
-        scrollWrapper.innerHTML = ''; // 只清空滚动区域，保留底部的 Toggle
+        scrollWrapper.innerHTML = ''; 
 
         const indicator = document.createElement('div');
         indicator.id = 'minimap-viewport-indicator';
@@ -229,6 +223,7 @@ function initMinimap() {
     setTimeout(updateMinimap, 1500);
 }
 
+// --- 4. 关键修改：Minimap 自动跟随逻辑 ---
 function syncIndicator() {
     const indicator = document.getElementById('minimap-viewport-indicator');
     const scrollWrapper = document.getElementById('chatgpt-minimap-scroll-wrapper');
@@ -264,14 +259,37 @@ function syncIndicator() {
 
         if (startItem && endItem) {
             const gap = 2; 
-            // 注意：offsetTop 现在是相对于 scrollWrapper 的，这正是我们想要的
+            
+            // 计算 Indicator 在 Wrapper 内部的绝对位置 (offsetTop 是相对于父级 relative 的距离)
             const topPos = startItem.offsetTop - gap;
             const bottomPos = endItem.offsetTop + endItem.offsetHeight + gap;
             const totalHeight = bottomPos - topPos;
 
+            // 设置 Indicator 样式
             indicator.style.top = `${topPos}px`;
             indicator.style.height = `${totalHeight}px`;
             indicator.style.opacity = "1";
+
+            // --- 新增：自动滚动 Minimap 容器 ---
+            // 获取当前容器已经滚动了多少
+            const currentScrollTop = scrollWrapper.scrollTop;
+            const wrapperHeight = scrollWrapper.clientHeight;
+            const currentScrollBottom = currentScrollTop + wrapperHeight;
+
+            // 如果 Indicator 的顶部跑到了容器可视区域上方 -> 向上滚
+            if (topPos < currentScrollTop) {
+                scrollWrapper.scrollTo({ 
+                    top: topPos - 20, // 留一点 padding
+                    behavior: 'smooth' 
+                });
+            } 
+            // 如果 Indicator 的底部跑到了容器可视区域下方 -> 向下滚
+            else if (bottomPos > currentScrollBottom) {
+                scrollWrapper.scrollTo({ 
+                    top: bottomPos - wrapperHeight + 20, // 滚到让底部刚好露出来，并留 padding
+                    behavior: 'smooth' 
+                });
+            }
         }
     } else {
         indicator.style.opacity = "0";
